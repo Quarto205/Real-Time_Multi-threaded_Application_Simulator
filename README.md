@@ -2,6 +2,14 @@
 Developed a simulator to demonstrate multithreading models (e.g., Many-to-One, One-to-Many, Many-to-Many) and thread synchronization using semaphores and monitors. The simulator should visualize thread states and interactions, providing insights into thread management and CPU scheduling in multi-threaded environments
 # README.md
 # Part of OS Simulator Module
+
+## 🌟 New: Web Application Version
+A modern, interactive React-based version of this simulator is now available in the `web app/` directory. It features a "Neon Night" UI, real-time LWP visualization, and interactive tutorials.
+
+[👉 Go to Web App Documentation](web%20app/README.md)
+
+---
+
 OS Simulator Code Analysis
 1. Project Structure & Architecture
 The project is structured as a modular Python application. Based on the imports found in main_window.py (e.g., from app.engine.scheduler import Scheduler), the files are intended to be organized into a specific package hierarchy, likely:
