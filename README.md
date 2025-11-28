@@ -1,104 +1,128 @@
-# Real-Time_Multi-threaded_Application_Simulator
-Developed a simulator to demonstrate multithreading models (e.g., Many-to-One, One-to-Many, Many-to-Many) and thread synchronization using semaphores and monitors. The simulator should visualize thread states and interactions, providing insights into thread management and CPU scheduling in multi-threaded environments
-# README.md
-# Part of OS Simulator Module
-OS Simulator Code Analysis
-1. Project Structure & Architecture
-The project is structured as a modular Python application. Based on the imports found in main_window.py (e.g., from app.engine.scheduler import Scheduler), the files are intended to be organized into a specific package hierarchy, likely:
+# Neon OS Simulator
 
-OS_Simulator/
-├── main.py                   # The Entry Point (Run this file)
-├── README.md                 # Project Documentation
-├── requirements.txt          # Dependencies (e.g., tkinter is built-in, maybe 'pandas' later)
-└── app/                      # Main Application Package
-    ├── __init__.py
-    ├── models/               # DATA LAYER
-    │   ├── __init__.py
-    │   └── thread_model.py   # Defines the Thread class (ID, State, Burst)
-    ├── engine/               # LOGIC LAYER (Module A)
-    │   ├── __init__.py
-    │   └── scheduler.py      # Round Robin Logic, Tick System, Context Switching
-    ├── ui/                   # GUI LAYER (Module B)
-    │   ├── __init__.py
-    │   ├── main_window.py    # Main Tkinter Window & Controls
-    │   └── components.py     # Helper widgets (Queue frames, Thread Cards)
-    └── analytics/            # DATA LAYER (Module C)
-        ├── __init__.py
-        └── logger.py         # Handles logs and Gantt history storage
-Note: Several files (styles.py, logger.py, synchronizer.py, gantt_chart.py) are currently empty placeholders, suggesting that features like advanced styling, dedicated logging, thread synchronization (mutex/semaphores), and complex chart drawing were planned but not yet implemented.
+A modern, interactive Operating System Simulator built with React and Tailwind CSS. This web application visualizes core OS concepts including process scheduling, threading models, synchronization primitives, and resource management in a real-time, "Neon Night" themed interface.
 
-2. Core Logic Analysis
+## 🚀 Features
 
-A. Thread Model (thread_model.py)
+### 1. Process Scheduling
+-   **Round Robin (RR) Algorithm**: Visualizes time-sliced execution with a configurable time quantum.
+-   **Dynamic CPU Count**: Simulate single-core or multi-core systems (up to 4 CPUs).
+-   **Process States**: Visual representation of NEW, READY, RUNNING, BLOCKED, and TERMINATED states.
 
-This is a pure data class representing a Process Control Block (PCB).
+### 2. Threading Models
+Explore how different threading models affect concurrency and blocking behavior:
+-   **One-to-One (1:1)**: Each user thread maps to a kernel thread. High concurrency; blocking one thread doesn't affect others in the same process.
+-   **Many-to-One (M:1)**: Multiple user threads map to a single kernel thread. If one thread blocks on a system call, the entire process blocks.
+-   **Many-to-Many (M:M)**: Hybrid model with a pool of Lightweight Processes (LWPs).
+-   **LWP Highway Visualizer**: A dedicated view showing the mapping of User Threads to Kernel Threads (LWPs) in real-time, visualizing the "Highway" lanes where threads travel.
 
-Attributes: Stores id, burst_time, priority, state, and timing statistics.
+### 3. Synchronization & Deadlocks
+Interactive demonstration of synchronization primitives:
+-   **System Resources (Kernel Objects)**:
+    -   **Mutexes**: Binary locks (e.g., Database).
+    -   **Semaphores**: Counting semaphores (e.g., Printer, Disk I/O).
+-   **Monitors**:
+    -   **Mesa Semantics**: Visualizes Monitor Entry Queue, Condition Variables (Wait/Signal), and Lock ownership.
+    -   **Buffer Monitor**: Simulate a Producer-Consumer scenario with `NotEmpty` and `NotFull` condition variables.
 
-History Tracking: Uniquely, it maintains a self.history list used to draw the Gantt chart later. This stores tuples of (start, end, state), allowing the UI to reconstruct the execution timeline.
+### 4. Interactive Controls
+-   **Simulation Control**: Play, Pause (with **Auto-Pause** on idle), and Reset the simulation clock.
+-   **Speed Control**: Adjust the simulation speed from slow-motion to fast-forward.
+-   **Process Creation**: Spawn new processes with custom:
+    -   Thread Count
+    -   Burst Time
+    -   Burst Time
+    -   Priority
+-   **Resource Time Limit**: Configure a maximum time a thread can hold a resource before being force-released (prevents deadlocks/hogging).
+-   **In-App User Manual**: Built-in interactive guide with test cases and concept explanations.
 
-B. The Scheduler Engine (scheduler.py)
+### 5. Real-time Visualization
+-   **Gantt-style CPU View**: See which thread is running on which CPU.
+-   **Queues**: Inspect the Ready Queue and Blocked Queue in real-time.
+-   **Resource Status**: View current holders and waiting queues for all resources.
+-   **Event Log**: Detailed log of all system events (Context Switches, Resource Acquisition, Thread Termination).
 
-This is the "brain" of the simulation.
+## 🛠️ Tech Stack
 
-Algorithm: It implements Round Robin (RR) scheduling.
+-   **Frontend Framework**: [React](https://react.dev/) (v18+)
+-   **Build Tool**: [Vite](https://vitejs.dev/)
+-   **Styling**: [Tailwind CSS](https://tailwindcss.com/)
+-   **Icons**: [Lucide React](https://lucide.dev/)
+-   **State Management**: React `useReducer` for complex simulation state.
 
-Time Management: It does not run in real-time; instead, it uses a discrete "tick" system (next_tick()). Each tick represents 1 unit of time (e.g., 1 second or 1 cycle).
+## 📦 Installation & Setup
 
-Lifecycle Logic:
+1.  **Prerequisites**: Ensure you have [Node.js](https://nodejs.org/) installed.
 
-Admission: Moves threads from NEW to READY.
+2.  **Install Dependencies**:
+    Navigate to the project directory and run:
+    ```bash
+    npm install
+    ```
 
-Execution: Decrements remaining_time of the RUNNING thread.
+3.  **Run Development Server**:
+    Start the local development server:
+    ```bash
+    npm run dev
+    ```
+    The app will be available at `http://localhost:5173` (or the port shown in your terminal).
 
-Context Switching:
+4.  **Build for Production**:
+    To create a production-ready build:
+    ```bash
+    npm run build
+    ```
 
-Termination: If remaining_time <= 0, state becomes TERMINATED.
+## 📖 Usage Guide
 
-Quantum Expiry: If current_quantum_counter >= time_quantum, the thread is preempted back to READY.
+### Dashboard Overview
+-   **Top Bar**: Displays the current Threading Model and Global Simulation Time.
+-   **Left Panel (Controls)**:
+    -   **Playback**: Toggle simulation run state and reset.
+    -   **Config**: Change Threading Model, CPU Count, and Simulation Speed.
+    -   **Spawner**: Create new user processes.
+-   **Center Panel (Visualization)**:
+    -   **CPUs**: Active threads currently executing.
+    -   **Ready Queue**: Threads waiting for CPU time.
+    -   **Blocked Queue**: Threads waiting for I/O or Synchronization primitives.
+-   **Right Panel (Resources)**:
+    -   **Monitor**: Visualizes the internal state of the 'Buffer' monitor.
+    -   **Kernel Resources**: Status of Database, Printer, and Disk I/O.
+    -   **Logs**: Real-time system event stream.
 
-Dispatching: If the CPU is free, it picks the next thread from the READY queue. Observation: The dispatching logic currently uses a simple iteration (FIFO within the Ready list), which combined with the quantum preemption effectively creates Round Robin.
+### Simulating Scenarios
+1.  **Concurrency Test**: Set CPUs to 2 or 4. Create multiple processes. Watch them share CPU time via Round Robin.
+2.  **Blocking Behavior**:
+    -   Set Model to **Many-to-One**.
+    -   Have a running thread request a "Printer" (System Resource).
+    -   Observe that *other threads of the same process* cannot run even if CPUs are free (Process Blocking).
+    -   Switch to **One-to-One** and observe the difference (only the requesting thread blocks).
+3.  **Synchronization**:
+    -   Have a thread **Enter Monitor**.
+    -   Have another thread try to Enter. It will be placed in the **Entry Queue**.
+    -   Have the owner **Wait** on a Condition Variable. It releases the lock and moves to the CV Queue.
+    -   Have another thread Enter and **Signal**.
 
-C. User Interface (main_window.py & components.py)
+## 📂 Project Structure
 
-The UI is built using tkinter.
+```
+web app/
+├── public/             # Static assets
+├── src/
+│   ├── assets/         # Project assets
+│   ├── App.css         # Global styles
+│   ├── App.jsx         # Main Application Component (Logic & UI)
+│   ├── index.css       # Tailwind directives
+│   └── main.jsx        # Entry point
+├── index.html          # HTML template
+├── package.json        # Dependencies and scripts
+├── tailwind.config.js  # Tailwind configuration
+└── vite.config.js      # Vite configuration
+```
 
-Visualization: It uses a grid layout to show "Queues" (Ready/Blocked) and the "CPU". Threads are drawn as "Cards" (draw_thread_card in components.py) with progress bars.
+## 🤝 Contributing
 
-Simulation Loop: The run_loop method in MainWindow uses root.after(self.speed, self.run_loop) to trigger the scheduler's next_tick() method repeatedly. This decouples the UI refresh rate from the simulation logic.
+Feel free to fork this project and submit pull requests. For major changes, please open an issue first to discuss what you would like to change.
 
-Interactivity: Users can dynamically add threads, pause/resume execution, and manually block/unblock threads (simulating I/O interrupts).
-
-3. Code Quality & Observations
-
-Strengths
-
-Separation of Concerns: The UI code (draw_thread_card) is distinct from the logic (Scheduler). The ThreadModel does not know about Tkinter, which is excellent design.
-
-Visual Feedback: The application provides detailed feedback, including a real-time log box, progress bars on thread cards, and a Gantt chart drawn on a Canvas.
-
-Robust State Handling: The scheduler handles edge cases like quantum expiry and manual I/O blocking effectively.
-
-Areas for Improvement / Missing Features
-
-Empty Modules: synchronizer.py is empty. Implementing this would allow simulation of Deadlocks or Race Conditions.
-
-Priority Handling: While priority is stored in the ThreadModel, the current Scheduler implementation ignores it. It strictly follows Round Robin/FIFO. A future update could implement Priority Scheduling or Multilevel Feedback Queues.
-
-Gantt Chart Refactoring: The Gantt drawing logic currently resides inside main_window.py. It should ideally be moved to the empty gantt_chart.py file to keep the main window class smaller.
-
-4. Summary
-
-This is a functional and well-structured foundation for an OS algorithm visualizer. It successfully demonstrates the mechanics of Context Switching, Time Slicing (Quantums), and Process States.
-# app/models/thread_model.py
-class ThreadModel:
-    def __init__(self, t_id, burst, priority, arrival_time, color):
-        self.id = t_id
-        self.burst_time = burst
-        self.remaining_time = burst
-        self.priority = priority
-        self.state = "NEW" 
-        self.color = color
-        self.arrival_time = arrival_time
-        self.waiting_time = 0
-        self.history = [] 
+---
+*Built for OS Project - Semester 3*
