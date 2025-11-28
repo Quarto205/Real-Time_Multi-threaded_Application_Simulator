@@ -31,7 +31,6 @@ Interactive demonstration of synchronization primitives:
 -   **Process Creation**: Spawn new processes with custom:
     -   Thread Count
     -   Burst Time
-    -   Burst Time
     -   Priority
 -   **Resource Time Limit**: Configure a maximum time a thread can hold a resource before being force-released (prevents deadlocks/hogging).
 -   **In-App User Manual**: Built-in interactive guide with test cases and concept explanations.
