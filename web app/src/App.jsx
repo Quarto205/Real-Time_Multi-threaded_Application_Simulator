@@ -27,7 +27,7 @@ const INITIAL_MONITORS = {
       "NotFull": [],  // Waiting Threads
       "NotEmpty": []  // Waiting Threads
     },
-    data: 0
+    data: 0 // Resource Count
   }
 };
 
@@ -70,15 +70,193 @@ const TEST_SCENARIOS = {
   },
   "MON": {
     config: { algorithm: "RR", cpuCount: 2, threadingModel: "One-to-One" },
-    processes: [{ threads: 2, burst: 30, priority: 1, delay: 0 }]
+    processes: [
+      {
+        threads: 1, burst: 30, priority: 1, delay: 0,
+        instructions: [
+          { at: 2, type: 'MONITOR_OP', payload: { monName: 'Buffer', op: 'ENTER' } },
+          { at: 4, type: 'MONITOR_OP', payload: { monName: 'Buffer', op: 'MODIFY_DATA', value: 1 } }, // Produce
+          { at: 5, type: 'MONITOR_OP', payload: { monName: 'Buffer', op: 'SIGNAL', cvName: 'NotEmpty' } },
+          { at: 8, type: 'MONITOR_OP', payload: { monName: 'Buffer', op: 'EXIT' } }
+        ]
+      },
+      {
+        threads: 1, burst: 30, priority: 1, delay: 0,
+        instructions: [
+          { at: 2, type: 'MONITOR_OP', payload: { monName: 'Buffer', op: 'ENTER' } },
+          // Mesa Style: While (data == 0) Wait(NotEmpty)
+          { at: 5, type: 'MONITOR_OP', payload: { monName: 'Buffer', op: 'CHECK_AND_WAIT', cvName: 'NotEmpty', condition: '==0' } },
+          { at: 6, type: 'MONITOR_OP', payload: { monName: 'Buffer', op: 'MODIFY_DATA', value: -1 } }, // Consume
+          { at: 10, type: 'MONITOR_OP', payload: { monName: 'Buffer', op: 'EXIT' } }
+        ]
+      }
+    ]
   },
   "DL": {
     config: { algorithm: "RR", cpuCount: 2, threadingModel: "One-to-One" },
-    processes: [{ threads: 1, burst: 20, priority: 1, delay: 0 }, { threads: 1, burst: 20, priority: 1, delay: 0 }]
+    processes: [
+      {
+        threads: 1, burst: 999, priority: 1, delay: 0,
+        instructions: [
+          { at: 0, type: 'RESOURCE_OP', payload: { resName: 'Database', op: 'REQ' } },
+          { at: 1, type: 'RESOURCE_OP', payload: { resName: 'Printer', op: 'REQ' } }
+        ]
+      },
+      {
+        threads: 1, burst: 999, priority: 1, delay: 0,
+        instructions: [
+          { at: 0, type: 'RESOURCE_OP', payload: { resName: 'Printer', op: 'REQ' } },
+          { at: 1, type: 'RESOURCE_OP', payload: { resName: 'Database', op: 'REQ' } }
+        ]
+      }
+    ]
   }
 };
 
 // --- LOGIC ENGINE ---
+
+// Helper: Process Resource Operation
+const processResourceOp = (state, tid, resName, op) => {
+  let nextState = { ...state, logs: [...state.logs] };
+  let res = nextState.resources[resName];
+  let t = nextState.threads.find(th => th.id === tid);
+  if (!t) return nextState;
+
+  if (op === 'REQ') {
+    if (res.value > 0) {
+      res.value--;
+      res.holders.push(tid);
+      t.heldResources.push({ name: resName, acquiredAt: state.time });
+      nextState.logs.unshift(`[${state.time}] T${tid} Acquired ${resName}`);
+    } else {
+      res.queue.push(tid);
+      t.state = "BLOCKED";
+      t.blockedType = 'SYSTEM';
+      const cpuIdx = nextState.runningThreads.indexOf(tid);
+      if (cpuIdx !== -1) nextState.runningThreads[cpuIdx] = null;
+      nextState.blockedQueue = [...nextState.blockedQueue, tid];
+      nextState.logs.unshift(`[${state.time}] T${tid} Blocked on ${resName}`);
+    }
+  } else if (op === 'REL') {
+    const heldRes = t.heldResources.find(r => r.name === resName);
+    if (heldRes) {
+      res.value++;
+      res.holders = res.holders.filter(h => h !== tid);
+      t.heldResources = t.heldResources.filter(r => r.name !== resName);
+      nextState.logs.unshift(`[${state.time}] T${tid} Released ${resName}`);
+
+      if (res.queue.length > 0) {
+        const wokenId = res.queue.shift();
+        const wokenT = nextState.threads.find(th => th.id === wokenId);
+        if (wokenT) {
+          res.value--;
+          res.holders.push(wokenId);
+          wokenT.heldResources.push({ name: resName, acquiredAt: state.time });
+          wokenT.state = "READY";
+          wokenT.blockedType = null;
+          nextState.blockedQueue = nextState.blockedQueue.filter(id => id !== wokenId);
+          nextState.readyQueue.push(wokenId);
+          nextState.logs.unshift(`[${state.time}] T${wokenId} Woken up`);
+        }
+      }
+    }
+  }
+  return nextState;
+};
+
+// Helper: Process Monitor Operation
+const processMonitorOp = (state, tid, monName, op, cvName, value) => {
+  let nextState = { ...state, logs: [...state.logs] };
+  let mon = nextState.monitors[monName];
+  let t = nextState.threads.find(th => th.id === tid);
+  if (!t) return nextState;
+
+  const cpuIdx = nextState.runningThreads.indexOf(tid);
+
+  if (op === 'ENTER') {
+    if (mon.lockedBy === null) {
+      mon.lockedBy = tid;
+      t.monitorHeld = monName;
+      nextState.logs.unshift(`[${state.time}] T${tid} Entered Monitor`);
+    } else if (mon.lockedBy === tid) {
+      // Already held
+    } else {
+      mon.queue.push(tid);
+      t.state = "BLOCKED";
+      t.blockedType = 'USER';
+      if (cpuIdx !== -1) nextState.runningThreads[cpuIdx] = null;
+      nextState.blockedQueue = [...nextState.blockedQueue, tid];
+      nextState.logs.unshift(`[${state.time}] T${tid} Waiting for Monitor`);
+    }
+  }
+  else if (op === 'EXIT') {
+    if (mon.lockedBy === tid) {
+      mon.lockedBy = null;
+      t.monitorHeld = null;
+      nextState.logs.unshift(`[${state.time}] T${tid} Exited Monitor`);
+      if (mon.queue.length > 0) {
+        const wokenId = mon.queue.shift();
+        const wokenT = nextState.threads.find(th => th.id === wokenId);
+        mon.lockedBy = wokenId;
+        wokenT.monitorHeld = monName;
+        wokenT.state = "READY";
+        wokenT.blockedType = null;
+        nextState.blockedQueue = nextState.blockedQueue.filter(id => id !== wokenId);
+        nextState.readyQueue.push(wokenId);
+      }
+    }
+  }
+  else if (op === 'WAIT') {
+    if (mon.lockedBy === tid) {
+      mon.lockedBy = null;
+      mon.cvs[cvName].push(tid);
+      t.state = "BLOCKED";
+      t.blockedType = 'USER';
+      t.monitorHeld = null;
+      if (cpuIdx !== -1) nextState.runningThreads[cpuIdx] = null;
+      nextState.blockedQueue = [...nextState.blockedQueue, tid];
+
+      if (mon.queue.length > 0) {
+        const wokenId = mon.queue.shift();
+        const wokenT = nextState.threads.find(th => th.id === wokenId);
+        mon.lockedBy = wokenId;
+        wokenT.monitorHeld = monName;
+        wokenT.state = "READY";
+        wokenT.blockedType = null;
+        nextState.blockedQueue = nextState.blockedQueue.filter(id => id !== wokenId);
+        nextState.readyQueue.push(wokenId);
+      }
+      nextState.logs.unshift(`[${state.time}] T${tid} Wait on CV ${cvName}`);
+    }
+  }
+  else if (op === 'SIGNAL') {
+    if (mon.lockedBy === tid) {
+      if (mon.cvs[cvName].length > 0) {
+        const wokenId = mon.cvs[cvName].shift();
+        mon.queue.push(wokenId); // Mesa: Move to Entry Queue
+        nextState.logs.unshift(`[${state.time}] T${tid} Signaled ${cvName} -> T${wokenId} to Entry Q`);
+      }
+    }
+  }
+  else if (op === 'BROADCAST') {
+    if (mon.lockedBy === tid) {
+      let count = 0;
+      while (mon.cvs[cvName].length > 0) {
+        const wokenId = mon.cvs[cvName].shift();
+        mon.queue.push(wokenId);
+        count++;
+      }
+      if (count > 0) nextState.logs.unshift(`[${state.time}] T${tid} Broadcast ${cvName} -> ${count} threads to Entry Q`);
+    }
+  }
+  else if (op === 'MODIFY_DATA') {
+    if (mon.lockedBy === tid) {
+      mon.data += value || 0;
+      nextState.logs.unshift(`[${state.time}] T${tid} Modified Data: ${mon.data}`);
+    }
+  }
+  return nextState;
+};
 
 function schedulerReducer(state, action) {
   // Helper: Check if a thread can be dispatched based on Threading Model
@@ -139,6 +317,48 @@ function schedulerReducer(state, action) {
           } else {
             t.history.push({ start: newState.time - 1, end: newState.time, state: "RUNNING" });
           }
+
+          // --- EXECUTE INSTRUCTIONS (AUTOMATION) ---
+          if (t.instructions && t.instructions.length > 0) {
+            const nextInstr = t.instructions[0];
+            if ((newState.time - t.arrivalTime) >= nextInstr.at) {
+              let instructionCompleted = true;
+
+              if (nextInstr.type === 'RESOURCE_OP') {
+                newState = processResourceOp(newState, t.id, nextInstr.payload.resName, nextInstr.payload.op);
+              } else if (nextInstr.type === 'MONITOR_OP') {
+                if (nextInstr.payload.op === 'CHECK_AND_WAIT') {
+                  const mon = newState.monitors[nextInstr.payload.monName];
+                  // Simple condition check: if data == 0 (for Consumer)
+                  // In a real app, we'd parse the condition. Here we assume "Wait if data == 0"
+                  if (mon.data === 0) {
+                    newState = processMonitorOp(newState, t.id, nextInstr.payload.monName, 'WAIT', nextInstr.payload.cvName);
+                    instructionCompleted = false; // Stay on this instruction (Loop)
+                  } else {
+                    // Condition met (data > 0), proceed to next instruction (Consume)
+                    instructionCompleted = true;
+                  }
+                } else {
+                  newState = processMonitorOp(newState, t.id, nextInstr.payload.monName, nextInstr.payload.op, nextInstr.payload.cvName, nextInstr.payload.value);
+                }
+              }
+
+              // Re-fetch thread as state might have changed (blocked)
+              const updatedT = newState.threads.find(th => th.id === tid);
+
+              if (instructionCompleted) {
+                t.instructions.shift(); // Remove instruction only if completed
+              }
+
+              if (updatedT.state !== "RUNNING") {
+                newRunning[i] = null;
+                newQuantum[i] = 0;
+                continue; // Stop processing this thread for this tick
+              }
+            }
+          }
+          t.elapsedBurst += 1;
+          // -----------------------------------------
 
           t.remainingTime -= 1;
           newQuantum[i] += 1;
@@ -319,7 +539,7 @@ function schedulerReducer(state, action) {
     }
 
     case 'CREATE_PROCESS': {
-      const { threadCount, burst, priority, model, arrivalDelay } = action.payload;
+      const { threadCount, burst, priority, model, arrivalDelay, instructions } = action.payload;
       const pid = Object.keys(state.processes).length + 1;
       const color = COLORS[(pid - 1) % COLORS.length];
 
@@ -345,7 +565,9 @@ function schedulerReducer(state, action) {
           history: [],
           heldResources: [],
           monitorHeld: null,
-          blockedType: null
+          blockedType: null,
+          instructions: instructions ? JSON.parse(JSON.stringify(instructions)) : [],
+          elapsedBurst: 0
         });
       }
 
@@ -381,116 +603,12 @@ function schedulerReducer(state, action) {
 
     case 'RESOURCE_OP': {
       const { tid, resName, op } = action.payload;
-      let nextState = { ...state };
-      let res = nextState.resources[resName];
-      let t = nextState.threads.find(th => th.id === tid);
-
-      if (op === 'REQ') {
-        if (res.value > 0) {
-          res.value--;
-          res.holders.push(tid);
-          t.heldResources.push({ name: resName, acquiredAt: state.time });
-          nextState.logs.unshift(`[${state.time}] T${tid} Acquired ${resName}`);
-        } else {
-          res.queue.push(tid);
-          t.state = "BLOCKED";
-          t.blockedType = 'SYSTEM'; // CRITICAL: Holds LWP in M:1
-          const cpuIdx = nextState.runningThreads.indexOf(tid);
-          if (cpuIdx !== -1) nextState.runningThreads[cpuIdx] = null;
-          nextState.blockedQueue = [...nextState.blockedQueue, tid]; // Create new array
-          nextState.logs.unshift(`[${state.time}] T${tid} Blocked on ${resName}`);
-        }
-      } else if (op === 'REL') {
-        const heldRes = t.heldResources.find(r => r.name === resName);
-        if (heldRes) {
-          res.value++;
-          res.holders = res.holders.filter(h => h !== tid);
-          t.heldResources = t.heldResources.filter(r => r.name !== resName);
-          nextState.logs.unshift(`[${state.time}] T${tid} Released ${resName}`);
-
-          if (res.queue.length > 0) {
-            const wokenId = res.queue.shift();
-            const wokenT = nextState.threads.find(th => th.id === wokenId);
-            res.value--;
-            res.holders.push(wokenId);
-            wokenT.heldResources.push({ name: resName, acquiredAt: state.time });
-            wokenT.state = "READY";
-            wokenT.blockedType = null;
-            nextState.blockedQueue = nextState.blockedQueue.filter(id => id !== wokenId);
-            nextState.readyQueue.push(wokenId);
-            nextState.logs.unshift(`[${state.time}] T${wokenId} Woken up`);
-          }
-        }
-      }
-      return nextState;
+      return processResourceOp(state, tid, resName, op);
     }
 
     case 'MONITOR_OP': {
-      const { tid, monName, op, cvName } = action.payload;
-      let nextState = { ...state };
-      let mon = nextState.monitors[monName];
-      let t = nextState.threads.find(th => th.id === tid);
-      const cpuIdx = nextState.runningThreads.indexOf(tid);
-
-      if (op === 'ENTER') {
-        if (mon.lockedBy === null) {
-          mon.lockedBy = tid;
-          t.monitorHeld = monName;
-          nextState.logs.unshift(`[${state.time}] T${tid} Entered Monitor`);
-        } else {
-          mon.queue.push(tid);
-          t.state = "BLOCKED";
-          t.blockedType = 'USER'; // Yields LWP
-          if (cpuIdx !== -1) nextState.runningThreads[cpuIdx] = null;
-          nextState.blockedQueue = [...nextState.blockedQueue, tid];
-          nextState.logs.unshift(`[${state.time}] T${tid} Waiting for Monitor`);
-        }
-      }
-      else if (op === 'EXIT') {
-        if (mon.lockedBy === tid) {
-          mon.lockedBy = null;
-          t.monitorHeld = null;
-          nextState.logs.unshift(`[${state.time}] T${tid} Exited Monitor`);
-          if (mon.queue.length > 0) {
-            const wokenId = mon.queue.shift();
-            const wokenT = nextState.threads.find(th => th.id === wokenId);
-            mon.lockedBy = wokenId;
-            wokenT.monitorHeld = monName;
-            wokenT.state = "READY";
-            wokenT.blockedType = null;
-            nextState.blockedQueue = nextState.blockedQueue.filter(id => id !== wokenId);
-            nextState.readyQueue.push(wokenId);
-          }
-        }
-      }
-      else if (op === 'WAIT') {
-        mon.lockedBy = null;
-        mon.cvs[cvName].push(tid);
-        t.state = "BLOCKED";
-        t.blockedType = 'USER';
-        if (cpuIdx !== -1) nextState.runningThreads[cpuIdx] = null;
-        nextState.blockedQueue = [...nextState.blockedQueue, tid];
-        if (mon.queue.length > 0) {
-          const wokenId = mon.queue.shift();
-          const wokenT = nextState.threads.find(th => th.id === wokenId);
-          mon.lockedBy = wokenId;
-          wokenT.monitorHeld = monName;
-          wokenT.state = "READY";
-          wokenT.blockedType = null;
-          nextState.blockedQueue = nextState.blockedQueue.filter(id => id !== wokenId);
-          nextState.readyQueue.push(wokenId);
-        }
-        nextState.logs.unshift(`[${state.time}] T${tid} Wait on CV`);
-      }
-      else if (op === 'SIGNAL') {
-        if (mon.cvs[cvName].length > 0) {
-          const wokenId = mon.cvs[cvName].shift();
-          // Mesa Semantics: Woken thread goes to Monitor Entry Queue (Mutex)
-          mon.queue.push(wokenId);
-          nextState.logs.unshift(`[${state.time}] T${tid} Signaled ${cvName} -> T${wokenId} to Entry Q`);
-        }
-      }
-      return nextState;
+      const { tid, monName, op, cvName, value } = action.payload;
+      return processMonitorOp(state, tid, monName, op, cvName, value);
     }
 
     default: return state;
@@ -548,6 +666,10 @@ const ThreadCard = ({ thread, type, dispatch }) => {
               className="flex-1 bg-blue-900/50 hover:bg-blue-800 text-[9px] text-blue-200 border border-blue-800 rounded px-1 py-0.5">
               Req Prn
             </button>
+            <button onClick={() => dispatch({ type: 'RESOURCE_OP', payload: { tid: thread.id, resName: 'Disk I/O', op: 'REQ' } })}
+              className="flex-1 bg-blue-900/50 hover:bg-blue-800 text-[9px] text-blue-200 border border-blue-800 rounded px-1 py-0.5">
+              Req Disk
+            </button>
           </div>
 
           <div className="col-span-2 border-t border-gray-700 pt-1 mt-1">
@@ -569,6 +691,10 @@ const ThreadCard = ({ thread, type, dispatch }) => {
                 <button onClick={() => dispatch({ type: 'MONITOR_OP', payload: { tid: thread.id, monName: 'Buffer', op: 'EXIT' } })}
                   className="bg-red-900/50 text-red-200 border border-red-800 rounded text-[9px]">
                   Exit
+                </button>
+                <button onClick={() => dispatch({ type: 'MONITOR_OP', payload: { tid: thread.id, monName: 'Buffer', op: 'BROADCAST', cvName: 'NotEmpty' } })}
+                  className="col-span-3 bg-green-900/50 text-green-200 border border-green-800 rounded text-[9px] mt-1">
+                  Broadcast
                 </button>
               </div>
             )}
@@ -852,13 +978,11 @@ const TestCasesPanel = ({ onClose, onLoadScenario }) => (
               </h4>
               <p className="text-xs text-gray-500 mt-1 mb-2">Concept: Wait (sleep) and Signal (wake up) using Condition Variables.</p>
               <div className="bg-black/40 p-2 rounded text-xs font-mono text-green-400">
-                1. Reset. CPUs=2. Spawn Process (2 Threads).<br />
-                2. T1 (Prod): Hover &rarr; "Enter Monitor" &rarr; "Sig Empty" &rarr; "Exit".<br />
-                3. T2 (Cons): Hover &rarr; "Enter Monitor" &rarr; "Wt Empty".<br />
-                Observation: T2 sleeps in "NotEmpty" CV Queue.<br />
-                4. Wake Up: T1 runs &rarr; "Enter Monitor" &rarr; "Sig Empty".<br />
-                Observation: T2 moves to Entry Queue (Mesa).
-                Observation: T2 moves to Entry Queue (Mesa).
+                1. Click "Run Scenario" below.<br />
+                2. Click Play button.<br />
+                Observation: The simulation automatically executes Monitor operations.<br />
+                - T1 (Prod) enters, signals, and exits.<br />
+                - T2 (Cons) enters, waits, and is woken up by T1.
               </div>
               <button onClick={() => onLoadScenario("MON")} className="mt-2 w-full bg-cyan-900/50 hover:bg-cyan-800 text-cyan-200 text-xs font-bold py-1 rounded border border-cyan-700">
                 Run Scenario
@@ -873,11 +997,11 @@ const TestCasesPanel = ({ onClose, onLoadScenario }) => (
               </h4>
               <p className="text-xs text-gray-500 mt-1 mb-2">Concept: T1 holds A wants B. T2 holds B wants A.</p>
               <div className="bg-black/40 p-2 rounded text-xs font-mono text-green-400">
-                1. Spawn T1, T2.<br />
-                2. T1 runs &rarr; "Req DB".<br />
-                3. T2 runs &rarr; "Req Prn".<br />
-                4. T1 runs &rarr; "Req Prn" (Blocked).<br />
-                5. T2 runs &rarr; "Req DB" (Blocked).<br />
+                1. Click "Run Scenario" below.<br />
+                2. Click Play button.<br />
+                Observation: The simulation automatically executes Resource requests.<br />
+                - T1 acquires DB, then requests Printer (Blocks).<br />
+                - T2 acquires Printer, then requests DB (Blocks).<br />
                 Result: Deadlock. Both stuck.
               </div>
               <button onClick={() => onLoadScenario("DL")} className="mt-2 w-full bg-cyan-900/50 hover:bg-cyan-800 text-cyan-200 text-xs font-bold py-1 rounded border border-cyan-700">
@@ -920,7 +1044,7 @@ export default function App() {
     // Slight delay to allow reset to process before creating processes
     setTimeout(() => {
       scenario.processes.forEach(p => {
-        dispatch({ type: 'CREATE_PROCESS', payload: { threadCount: p.threads, burst: p.burst, priority: p.priority, model: scenario.config.threadingModel, arrivalDelay: p.delay } });
+        dispatch({ type: 'CREATE_PROCESS', payload: { threadCount: p.threads, burst: p.burst, priority: p.priority, model: scenario.config.threadingModel, arrivalDelay: p.delay, instructions: p.instructions } });
       });
       setShowTestCases(false);
     }, 100);
