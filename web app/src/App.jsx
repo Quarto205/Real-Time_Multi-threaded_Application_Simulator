@@ -49,7 +49,8 @@ const initialState = {
     cpuCount: 2,
     threadingModel: "One-to-One",
     defaultLWP: 2,
-    resourceTimeLimit: 0 // 0 = Disabled
+    resourceTimeLimit: 0, // 0 = Disabled
+    isPreemptive: true
   },
   quantumCounters: {}
 };
@@ -355,10 +356,38 @@ function schedulerReducer(state, action) {
                 newQuantum[i] = 0;
                 continue; // Stop processing this thread for this tick
               }
+              betterThreadIndex = newReady.findIndex(readyTid => {
+                const readyT = newThreads.find(rt => rt.id === readyTid);
+                return readyT.priority < currentThread.priority;
+              });
+            } else if (newState.config.algorithm === "SJF") {
+              // Find if any ready thread has strictly less remaining time
+              betterThreadIndex = newReady.findIndex(readyTid => {
+                const readyT = newThreads.find(rt => rt.id === readyTid);
+                return readyT.remainingTime < currentThread.remainingTime;
+              });
+            }
+
+            if (betterThreadIndex !== -1) {
+              // Preempt!
+              const betterTid = newReady[betterThreadIndex];
+
+              // 1. Move current thread back to Ready
+              currentThread.state = "READY";
+              newReady.push(currentThread.id);
+
+              // 2. Remove current thread from CPU
+              newRunning[i] = null;
+              newQuantum[i] = 0;
+
+              newLogs.unshift(`[${newState.time}] T${currentThread.id} Preempted by T${betterTid}`);
+
+              // We stop processing this thread for this tick, dispatch will pick up the new one (or the best one) in the next step (Dispatch Phase)
+              // Actually, we should let the Dispatch phase handle picking the new one. We just need to vacate the CPU.
+              continue;
             }
           }
-          t.elapsedBurst += 1;
-          // -----------------------------------------
+          // ------------------------
 
           t.remainingTime -= 1;
           newQuantum[i] += 1;
@@ -558,7 +587,7 @@ function schedulerReducer(state, action) {
           processId: pid,
           burstTime: burst,
           remainingTime: burst,
-          priority: priority,
+          priority: Math.max(-19, Math.min(20, priority)), // Clamp Priority
           arrivalTime: state.time + (arrivalDelay || 0),
           state: "NEW",
           color: color,
@@ -614,9 +643,6 @@ function schedulerReducer(state, action) {
     default: return state;
   }
 }
-
-// --- UI COMPONENTS ---
-
 const Card = ({ children, className = "" }) => (
   <div className={`bg-gray-900/60 backdrop-blur-md border border-gray-700/50 rounded-xl p-4 shadow-xl ${className}`}>
     {children}
@@ -1063,6 +1089,18 @@ export default function App() {
     });
   };
 
+  const downloadLogs = () => {
+    if (state.logs.length === 0) return;
+    const csvContent = "data:text/csv;charset=utf-8," + state.logs.join("\n");
+    const encodedUri = encodeURI(csvContent);
+    const link = document.createElement("a");
+    link.setAttribute("href", encodedUri);
+    link.setAttribute("download", "neon_os_logs.csv");
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+  };
+
   return (
     <div className="min-h-screen bg-gray-950 text-gray-100 p-4 font-sans selection:bg-cyan-500/30">
       <header className="bg-gray-900/80 border-b border-gray-800 backdrop-blur sticky top-0 z-50">
@@ -1131,6 +1169,15 @@ export default function App() {
                 </select>
               </div>
 
+              {(state.config.algorithm === "Priority" || state.config.algorithm === "SJF") && (
+                <div className="flex items-center gap-2 bg-gray-900 p-2 rounded border border-gray-700">
+                  <input type="checkbox" id="preempt" className="accent-cyan-500 w-4 h-4"
+                    checked={state.config.isPreemptive}
+                    onChange={(e) => dispatch({ type: 'UPDATE_CONFIG', payload: { isPreemptive: e.target.checked } })} />
+                  <label htmlFor="preempt" className="text-[10px] text-gray-400 font-bold uppercase cursor-pointer select-none">Preemptive</label>
+                </div>
+              )}
+
               <div className="grid grid-cols-2 gap-2">
                 <div>
                   <label className="text-[10px] text-gray-500">CPUs</label>
@@ -1193,7 +1240,21 @@ export default function App() {
                 <div>
                   <label className="text-[9px] text-gray-600">Prio</label>
                   <input type="number" className="w-full bg-gray-900 border border-gray-700 rounded p-1 text-xs text-center"
-                    value={procConfig.priority} onChange={e => setProcConfig({ ...procConfig, priority: parseInt(e.target.value) })} />
+                    value={procConfig.priority}
+                    onChange={e => {
+                      const val = parseInt(e.target.value);
+                      if (!isNaN(val)) {
+                        setProcConfig({ ...procConfig, priority: Math.max(-19, Math.min(20, val)) });
+                      } else {
+                        setProcConfig({ ...procConfig, priority: e.target.value }); // Allow typing
+                      }
+                    }}
+                    onBlur={e => {
+                      let val = parseInt(e.target.value);
+                      if (isNaN(val)) val = 0;
+                      setProcConfig({ ...procConfig, priority: Math.max(-19, Math.min(20, val)) });
+                    }}
+                    min="-19" max="20" />
                 </div>
                 <div>
                   <label className="text-[9px] text-gray-600">Delay</label>
@@ -1335,6 +1396,12 @@ export default function App() {
           </Card>
 
           <Card className="h-40 flex flex-col">
+            <div className="flex justify-between items-center border-b border-gray-800 pb-2 mb-2">
+              <span className="text-xs font-bold text-gray-500 uppercase">System Logs</span>
+              <button onClick={downloadLogs} className="text-[10px] bg-gray-800 hover:bg-gray-700 text-cyan-400 px-2 py-0.5 rounded border border-gray-700 flex items-center gap-1">
+                <ArrowRight size={10} className="rotate-90" /> Export CSV
+              </button>
+            </div>
             <div className="flex-1 overflow-y-auto font-mono text-[9px] space-y-1 scrollbar-thin">
               {state.logs.map((log, i) => (
                 <div key={i} className="text-gray-500 border-b border-gray-800/50 pb-0.5">
